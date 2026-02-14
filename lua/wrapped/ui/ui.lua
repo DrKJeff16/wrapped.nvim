@@ -3,6 +3,7 @@ local volt = require "volt"
 local voltui = require "volt.ui"
 local highlights = require "wrapped.ui.highlights"
 local state = require "wrapped.state"
+local git = require "wrapped.core.git"
 
 local M = {}
 local ui_state =
@@ -20,83 +21,429 @@ local function close()
   ui_state.win, ui_state.buf = nil, nil
 end
 
+local function dd(n) return n > 9 and tostring(n) or "0" .. n end
+
+local function truncate(str, max)
+  if #str > max then return str:sub(1, max - 3) .. "..." end
+  return str
+end
+
+-- wraps text into multiple lines of max width
+local function wrap_lines(str, max, hl)
+  local result = {}
+  while #str > max do
+    local cut = str:sub(1, max)
+    local space = cut:match ".*()%s" or max
+    table.insert(result, { { str:sub(1, space), hl or "Normal" } })
+    str = str:sub(space + 1):gsub("^%s+", "")
+  end
+  if #str > 0 then table.insert(result, { { str, hl or "Normal" } }) end
+  return result
+end
+
+-- returns intensity index 0 (brightest) to 3 (dimmest)
+local function get_intensity(n)
+  if n > 5 then return "0" end
+  if n > 2 then return "1" end
+  if n > 0 then return "2" end
+  return "3"
+end
+
+local month_colors = highlights.month_colors
+local color_cycle = vim.list_extend(
+  vim.list_extend({}, month_colors),
+  vim.list_extend(vim.list_extend({}, month_colors), month_colors)
+)
+
+local function is_leap(y) return (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0) end
+
+local function build_heatmap(activity, width)
+  local year = state.heatmap_year
+  local months = {
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  }
+  local days_in = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+  if is_leap(year) then days_in[2] = 29 end
+  local day_names = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }
+
+  -- month header row with per-month color
+  local header = { { "   ", "Comment" }, { "  " } }
+  for i = 1, 12 do
+    table.insert(header, { "  " .. months[i] .. "  ", "Ex" .. color_cycle[i] })
+    if i < 12 then table.insert(header, { " " }) end
+  end
+
+  local sep =
+    voltui.separator("─", width - (state.xpad or 0) * 2 - 4, "Comment")
+  local lines = { header, sep }
+
+  -- 7 weekday rows
+  for d = 1, 7 do
+    table.insert(lines, { { day_names[d], "Comment" }, { " │ ", "Comment" } })
+  end
+
+  -- fill grid per month
+  for m = 1, 12 do
+    local start_dow = tonumber(
+      os.date("%w", os.time { year = year, month = m, day = 1 })
+    ) + 1
+
+    if m == 1 then
+      for n = 1, start_dow - 1 do
+        table.insert(lines[n + 2], { "  " })
+      end
+    end
+
+    local color = color_cycle[m]
+    for day = 1, days_in[m] do
+      local dow = tonumber(
+        os.date("%w", os.time { year = year, month = m, day = day })
+      ) + 1
+      local key = dd(day) .. dd(m) .. year
+      local count = activity[key] or 0
+      local hl = count > 0 and ("Wrapped" .. color .. get_intensity(count))
+        or "Linenr"
+      table.insert(lines[dow + 2], { "󱓻 ", hl })
+    end
+  end
+
+  voltui.border(lines, "Comment")
+
+  -- legend with green levels (matching typr)
+  local legend = {
+    { " Commit Activity", "WrappedGreen0" },
+    { "  " },
+    { "« ", "Comment" },
+    { tostring(year), "Special" },
+    { " »", "Comment" },
+    { "_pad_" },
+    { "  Less " },
+  }
+  for i = 3, 0, -1 do
+    table.insert(legend, { "󱓻 ", "WrappedGreen" .. i })
+  end
+  table.insert(legend, { " More" })
+  table.insert(lines, 1, voltui.hpad(legend, width - (state.xpad or 0) * 2 - 4))
+
+  return lines
+end
+
+local function build_size_chart(size_history, target_width)
+  local vals = size_history.values
+  if #vals == 0 then return {} end
+
+  local max_val = math.max(unpack(vals))
+  if max_val == 0 then max_val = 1 end
+
+  -- normalize to 1-100 scale for bar graph
+  local scaled = {}
+  for _, v in ipairs(vals) do
+    table.insert(scaled, math.floor((v / max_val) * 100))
+  end
+
+  -- account for side labels (~4 chars) + " │ " (3 chars)
+  local bar_w, bar_gap = 1, 1
+  local bar_area = target_width - 8
+  local max_items = math.floor(bar_area / (bar_w + bar_gap))
+
+  -- get the subset of data to display (last N items)
+  local display_vals = scaled
+  local num_data = #scaled
+  if num_data > max_items then
+    display_vals = {}
+    for i = num_data - (max_items - 1), num_data do
+      table.insert(display_vals, scaled[i])
+    end
+  end
+
+  local chart_data = {
+    val = display_vals,
+    footer_label = { "󰔵  Config Size Over Time", "WrappedTitle" },
+    format_labels = function(x)
+      return tostring(math.floor((x / 100) * max_val))
+    end,
+    baropts = {
+      w = bar_w,
+      gap = bar_gap,
+      format_hl = function(x)
+        if x > 85 then return "WrappedGreen0" end
+        if x > 60 then return "WrappedGreen1" end
+        if x > 30 then return "WrappedGreen2" end
+        return "WrappedGreen3"
+      end,
+    },
+  }
+
+  local chart = voltui.graphs.bar(chart_data)
+
+  return chart
+end
+
+local function build_stats_bars(
+  total_commits,
+  total_plugins,
+  total_plugins_ever,
+  total_lines
+)
+  local config = get_config()
+  local cap = config.cap
+  local width = get_config().size.width - (state.xpad or 0) * 2
+  local barlen = math.floor((width - 2) / 2)
+  local table_w = math.floor((barlen - 2) / 2)
+
+  local function build_bar(label, val, goal, icon, hl)
+    val = val or 0
+    local perc = math.min(math.floor((val / goal) * 100), 100)
+    return {
+      {
+        { icon .. " ", hl },
+        { label .. " ~ ", hl },
+        { tostring(val) .. " / " .. tostring(goal), hl },
+      },
+      {},
+      voltui.progressbar {
+        w = table_w,
+        val = perc,
+        icon = { on = "┃", off = "┃" },
+        hl = { on = hl, off = "Linenr" },
+      },
+    }
+  end
+
+  local commit_bars =
+    build_bar("  Commits", total_commits, cap.commits, "", "WrappedGreen0")
+  local plugin_bars =
+    build_bar("  Plugins", total_plugins, cap.plugins, "", "Special")
+  local ever_bars = build_bar(
+    "  Total Ever",
+    total_plugins_ever,
+    cap.plugins_ever,
+    "",
+    "WrappedBlue0"
+  )
+  local line_bars =
+    build_bar("  Lines", total_lines, cap.lines, "", "WrappedRed0")
+
+  local left_bars = voltui.grid_col {
+    { lines = commit_bars, w = table_w + 1, pad = 2 },
+    { lines = plugin_bars, w = barlen - table_w - 1 },
+  }
+  local right_bars = voltui.grid_col {
+    { lines = ever_bars, w = table_w + 1, pad = 2 },
+    { lines = line_bars, w = barlen - table_w - 1 },
+  }
+
+  return voltui.grid_col {
+    { lines = left_bars, w = barlen, pad = 2 },
+    { lines = right_bars, w = barlen },
+  }
+end
+
+local function build_plugins_files_table(plugin_history, file_stats)
+  local width = get_config().size.width - (state.xpad or 0) * 2
+  local barlen = math.floor((width - 2) / 2)
+  local table_w = math.floor((barlen - 2) / 2)
+
+  local function build_plugin_table(title, name, date)
+    local truncated_name = truncate(name or "None", table_w - 2)
+    local info_date = date and os.date("%Y-%m-%d", date) or "None"
+    local data = {
+      { { { truncated_name, "Normal" } } },
+      { { { info_date, "Comment" } } },
+    }
+    return voltui.table(data, table_w, "normal", { title, "WrappedTitle" })
+  end
+
+  local oldest = plugin_history and plugin_history.oldest_plugin
+  local newest = plugin_history and plugin_history.newest_plugin
+
+  local oldest_tbl = build_plugin_table(
+    "󰐱  Oldest Unupdated Plugin",
+    oldest and oldest.name,
+    oldest and oldest.date
+  )
+  oldest_tbl[1][1][2] = "WrappedBlue0" -- override title HL
+
+  local newest_tbl = build_plugin_table(
+    "  Newest Updated Plugin",
+    newest and newest.name,
+    newest and newest.date
+  )
+  newest_tbl[1][1][2] = "WrappedGreen0" -- override title HL
+
+  local left_inner = voltui.grid_col {
+    { lines = oldest_tbl, w = table_w + 1, pad = 2 },
+    { lines = newest_tbl, w = barlen - table_w - 1 },
+  }
+
+  local b_name = truncate(file_stats.biggest.name or "None", barlen - 20)
+  local s_name = truncate(file_stats.smallest.name or "None", barlen - 20)
+  local b_lines = tostring(file_stats.biggest.lines or 0) .. " lines"
+  local s_lines = tostring(file_stats.smallest.lines or 0) .. " lines"
+
+  local file_tbl_data = {
+    { { { b_name, "Normal" }, { " - ", "Comment" }, { b_lines, "Comment" } } },
+    { { { s_name, "Normal" }, { " - ", "Comment" }, { s_lines, "Comment" } } },
+  }
+
+  local file_tbl = voltui.table(
+    file_tbl_data,
+    barlen,
+    "normal",
+    { "  Biggest & smallest file", "WrappedYellow0" }
+  )
+
+  return voltui.grid_col {
+    { lines = left_inner, w = barlen, pad = 2 },
+    { lines = file_tbl, w = barlen },
+  }
+end
+
+local function build_top_files_table(file_stats, width)
+  local data = { { "  File Extension", "󰅪  Total Lines" } }
+  for i, stat in ipairs(file_stats.lines_by_type) do
+    if i > 5 then break end
+    table.insert(data, { stat.name, tostring(stat.lines) })
+  end
+  return voltui.table(
+    data,
+    width,
+    "Special",
+    { "󱔘  Top 5 Largest File Types", "WrappedYellow0" }
+  )
+end
+
 local function build_content(
   commits,
   total_count,
   plugin_count,
   first_commit_date,
   file_stats,
-  plugin_history
+  plugin_history,
+  config_stats,
+  commit_activity,
+  size_history
 )
   local lines = {}
   local function add(text, hl)
     table.insert(lines, { { text, hl or "Special" } })
   end
 
-  add("Total Commits: " .. total_count)
-  add("Total Plugins: " .. (plugin_count or 0))
-  add(
-    "Total Plugins Ever: "
-      .. (plugin_history and plugin_history.total_ever_installed or "Unknown")
+  vim.list_extend(
+    lines,
+    build_stats_bars(
+      total_count,
+      plugin_count,
+      plugin_history and plugin_history.total_ever_installed or 0,
+      file_stats.total_lines
+    )
   )
+  add(" ", "")
+  add(" ", "")
 
-  if plugin_history then
-    if plugin_history.oldest_plugin then
-      add(
-        "Oldest Unupdated Plugin: "
-          .. plugin_history.oldest_plugin.name
-          .. " ("
-          .. os.date("%Y-%m-%d", plugin_history.oldest_plugin.date)
-          .. ")"
-      )
-    end
-    if plugin_history.newest_plugin then
-      add(
-        "Newly Updated Plugin: "
-          .. plugin_history.newest_plugin.name
-          .. " ("
-          .. os.date("%Y-%m-%d", plugin_history.newest_plugin.date)
-          .. ")"
-      )
-    end
+  vim.list_extend(lines, build_plugins_files_table(plugin_history, file_stats))
+
+  if config_stats then
+    local barlen =
+      math.floor((get_config().size.width - (state.xpad or 0) * 2 - 2) / 2)
+    local left_tbl = {
+      { "  Sessions", "  Time" },
+      { "Streak", tostring(config_stats.longest_streak) .. " days" },
+      { "Last Change", config_stats.last_change },
+    }
+    local right_tbl = {
+      { "  History", "󰌵 Info" },
+      { "Started in", (first_commit_date or "Unknown") },
+      { "Lifetime", config_stats.lifetime },
+    }
+
+    local stats_grid = voltui.grid_col {
+      {
+        lines = voltui.table(left_tbl, barlen, "Special"),
+        w = barlen,
+        pad = 2,
+      },
+      { lines = voltui.table(right_tbl, barlen, "Special"), w = barlen },
+    }
+    vim.list_extend(lines, stats_grid)
   end
 
-  add("Started in: " .. (first_commit_date or "Unknown"))
-  add("Total Lines: " .. file_stats.total_lines)
-  add(
-    "Biggest File: "
-      .. file_stats.biggest.name
-      .. " ("
-      .. file_stats.biggest.lines
-      .. ")"
-  )
-  add(
-    "Smallest File: "
-      .. file_stats.smallest.name
-      .. " ("
-      .. file_stats.smallest.lines
-      .. ")"
-  )
-  add(string.rep("─", 20), "Comment")
+  -- heatmap
+  if ui_state.commit_activity then
+    table.insert(lines, { { " ", "" } })
+    vim.list_extend(
+      lines,
+      build_heatmap(ui_state.commit_activity, get_config().size.width)
+    )
+  end
+  add(" ", "")
 
+  local inner_w = get_config().size.width - (state.xpad or 0) * 2
+  add("  Commit Messages", "WrappedRed0")
+  add(" ", "")
+  table.insert(lines, {
+    { "Shortest: ", "WrappedRed0" },
+    { config_stats.shortest_msg, "WrappedLabel" },
+  })
+
+  local long_prefix = "Longest: "
+  -- wrap narrower to account for prefix and padding
+  local wrap_w = inner_w - #long_prefix - 1
+
+  local long_lines =
+    wrap_lines(config_stats.longest_msg, wrap_w, "WrappedLabel")
+  if #long_lines > 0 then
+    table.insert(long_lines[1], 1, { long_prefix, "WrappedRed0" })
+  else
+    table.insert(long_lines, { { long_prefix, "WrappedRed0" } })
+  end
+  vim.list_extend(lines, long_lines)
+  add(" ", "")
+
+  -- random commits
+  add(" Random Commits", "WrappedBlue0")
+  add(" ", "")
   for _, commit in ipairs(commits) do
-    table.insert(lines, { { commit, "Normal" } })
+    vim.list_extend(lines, wrap_lines(commit, inner_w))
   end
   table.insert(lines, { { " ", "" } })
+  table.insert(lines, voltui.separator("─", inner_w, "WrappedSeparator"))
+  table.insert(lines, { { " ", "" } })
 
-  local tbl_data = { { "Name", "Lines" } }
-  for _, stat in ipairs(file_stats.lines_by_type) do
-    table.insert(tbl_data, { stat.name, tostring(stat.lines) })
+  -- size chart & top files
+  local width = get_config().size.width - (state.xpad or 0) * 2
+  local left_w = math.floor((width - 2) / 2)
+  local right_w = width - left_w - 2
+
+  local left_col = {}
+  if size_history and #size_history.values > 0 then
+    left_col = build_size_chart(size_history, left_w)
+    -- Add padding to align with table (2 lines)
+    for _ = 1, 2 do
+      table.insert(left_col, 1, { { " ", "" } })
+    end
   end
 
-  local table_lines = voltui.table(
-    tbl_data,
-    get_config().size.width - (state.xpad or 0) * 2,
-    "Special"
-  )
-  vim.list_extend(lines, table_lines)
+  local right_col = build_top_files_table(file_stats, right_w)
 
-  -- vertical padding
+  local grid = voltui.grid_col {
+    { lines = left_col, w = left_w, pad = 2 },
+    { lines = right_col, w = right_w },
+  }
+  vim.list_extend(lines, grid)
+
+  -- vertical pad
   local ypad = state.ypad or 0
   for _ = 1, ypad do
     table.insert(lines, 1, { { " ", "" } })
@@ -108,30 +455,49 @@ local function build_content(
   return lines
 end
 
+-- refreshes heatmap data and redraws
+local function refresh_heatmap()
+  ui_state.commit_activity = git.get_commit_activity(state.heatmap_year)
+end
+
 ---@param commits string[]
 ---@param total_count number|string
 ---@param plugin_count number
 ---@param first_commit_date string
 ---@param file_stats Wrapped.FileStats
 ---@param plugin_history Wrapped.PluginHistory
+---@param config_stats Wrapped.ConfigStats
+---@param commit_activity table<string, number>
+---@param size_history { values: number[], labels: string[] }
 function M.open(
   commits,
   total_count,
   plugin_count,
   first_commit_date,
   file_stats,
-  plugin_history
+  plugin_history,
+  config_stats,
+  commit_activity,
+  size_history
 )
   if ui_state.win and api.nvim_win_is_valid(ui_state.win) then
     api.nvim_set_current_win(ui_state.win)
     return
   end
 
+  -- store for year cycling
+  state.first_commit_year = git.get_first_commit_year()
+  ui_state.commit_activity = commit_activity
+
   local config = get_config()
   ui_state.buf = api.nvim_create_buf(false, true)
   local w, h = config.size.width, config.size.height
   local row, col =
-    math.floor((vim.o.lines - h) / 2), math.floor((vim.o.columns - w) / 2)
+    math.floor((vim.o.lines - h) / 2) - 1, math.floor((vim.o.columns - w) / 2)
+
+  local border_opts = (type(config.border) == "string" and config.border)
+    or (config.border and "single")
+    or "none"
 
   ui_state.win = api.nvim_open_win(ui_state.buf, true, {
     relative = "editor",
@@ -140,25 +506,32 @@ function M.open(
     width = w,
     height = h,
     style = "minimal",
-    border = config.border and "single" or "none",
+    border = border_opts,
     zindex = 100,
   })
+
+  api.nvim_set_option_value("scrolloff", 0, { win = ui_state.win })
 
   highlights.apply_float(ui_state.ns)
   api.nvim_win_set_hl_ns(ui_state.win, ui_state.ns)
 
-  local content = build_content(
-    commits,
-    total_count,
-    plugin_count,
-    first_commit_date,
-    file_stats,
-    plugin_history
-  )
+  local function get_content()
+    return build_content(
+      commits,
+      total_count,
+      plugin_count,
+      first_commit_date,
+      file_stats,
+      plugin_history,
+      config_stats,
+      commit_activity,
+      size_history
+    )
+  end
   volt.gen_data {
     {
       buf = ui_state.buf,
-      layout = { { lines = function() return content end, name = "git_log" } },
+      layout = { { lines = get_content, name = "git_log" } },
       xpad = state.xpad,
       ns = ui_state.ns,
     },
@@ -170,18 +543,41 @@ function M.open(
   if new_h ~= h then
     api.nvim_win_set_config(ui_state.win, {
       relative = "editor",
-      row = math.max(0, math.floor((vim.o.lines - new_h) / 2)),
+      row = math.max(0, math.floor((vim.o.lines - new_h) / 2) - 1),
       col = col,
       width = w,
       height = new_h,
+      border = border_opts,
     })
   end
 
   volt.run(ui_state.buf, { h = content_h, w = w })
 
+  local buf = ui_state.buf
   local map_opts = { noremap = true, silent = true, callback = close }
-  api.nvim_buf_set_keymap(ui_state.buf, "n", "q", "", map_opts)
-  api.nvim_buf_set_keymap(ui_state.buf, "n", "<Esc>", "", map_opts)
+  api.nvim_buf_set_keymap(buf, "n", "q", "", map_opts)
+  api.nvim_buf_set_keymap(buf, "n", "<Esc>", "", map_opts)
+
+  -- year cycling keymaps
+  local cur_year = tonumber(os.date "%Y")
+  local function cycle_year(delta)
+    local new_year = state.heatmap_year + delta
+    if new_year < state.first_commit_year or new_year > cur_year then return end
+    state.heatmap_year = new_year
+    refresh_heatmap()
+    volt.redraw(buf, "git_log")
+  end
+
+  api.nvim_buf_set_keymap(buf, "n", "<", "", {
+    noremap = true,
+    silent = true,
+    callback = function() cycle_year(-1) end,
+  })
+  api.nvim_buf_set_keymap(buf, "n", ">", "", {
+    noremap = true,
+    silent = true,
+    callback = function() cycle_year(1) end,
+  })
 end
 
 return M

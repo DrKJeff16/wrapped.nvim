@@ -1,6 +1,7 @@
 local Job = require "plenary.job"
 local M = {}
-local config_path = vim.fn.stdpath "config"
+
+local function get_path() return require("wrapped").config.path end
 
 ---@return number
 function M.get_count()
@@ -21,7 +22,7 @@ function M.get_history()
       "--",
       "lua/plugins",
     },
-    cwd = config_path,
+    cwd = get_path(),
   }
 
   job:sync()

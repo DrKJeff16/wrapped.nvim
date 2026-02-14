@@ -2,6 +2,7 @@ local M = {}
 
 ---@type Wrapped.Config
 M.defaults = {
+  path = vim.fn.stdpath "config",
   border = false,
   size = {
     width = 120,
@@ -9,6 +10,12 @@ M.defaults = {
   },
   exclude_filetype = {
     ".gitmodules",
+  },
+  cap = {
+    commits = 1000,
+    plugins = 100,
+    plugins_ever = 200,
+    lines = 10000,
   },
 }
 

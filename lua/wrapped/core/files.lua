@@ -1,9 +1,11 @@
 local M = {}
-local config_path = vim.fn.stdpath "config"
 local scandir = require "plenary.scandir"
+
+local function get_path() return require("wrapped").config.path end
 
 ---@return Wrapped.FileStats
 function M.get_stats()
+  local config_path = get_path()
   local stats = {
     total_lines = 0,
     biggest = { name = "", lines = 0 },
