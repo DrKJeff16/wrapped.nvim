@@ -8,7 +8,7 @@ local config_path = vim.fn.stdpath 'config'
 function M.get_commits()
   local job = Job:new {
     command = 'git',
-    args = { 'log', '-n', '5', '--oneline' },
+    args = { 'log', '-n', '10', '--oneline' },
     cwd = config_path,
   }
 

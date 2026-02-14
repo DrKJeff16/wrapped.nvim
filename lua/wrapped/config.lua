@@ -1,7 +1,6 @@
 local M = {}
 
 M.defaults = {
-  enabled = true,
   border = false,
   size = {
     width = 120,
