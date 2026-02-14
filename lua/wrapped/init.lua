@@ -14,8 +14,11 @@ end
 
 function M.run()
   if M.config.enabled then
-    local commits = require('wrapped.core.git').get_commits()
-    require('wrapped.ui.ui').open(commits)
+    local git = require 'wrapped.core.git'
+    local commits = git.get_commits()
+    local total_count = git.get_total_count()
+
+    require('wrapped.ui.ui').open(commits, total_count)
   else
     print 'wrapped.nvim is disabled'
   end

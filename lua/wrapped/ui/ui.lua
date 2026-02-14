@@ -72,7 +72,7 @@ local function create_window()
   api.nvim_win_set_hl_ns(ui_state.win, ui_state.ns)
 end
 
-function M.open(commits)
+function M.open(commits, total_count)
   if ui_state.win and api.nvim_win_is_valid(ui_state.win) then
     api.nvim_set_current_win(ui_state.win)
     return
@@ -84,6 +84,8 @@ function M.open(commits)
     {
       lines = function()
         local lines = {}
+        table.insert(lines, { { 'Total Commits: ' .. total_count, 'Special' } })
+        table.insert(lines, { { string.rep('─', 20), 'Comment' } })
         for _, commit in ipairs(commits) do
           table.insert(lines, { { commit, 'Normal' } })
         end
