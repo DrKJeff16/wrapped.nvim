@@ -14,6 +14,7 @@ M.config = require("wrapped.config").defaults()
 ---@param opts? WrappedConfig
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  if M.config.path == "" then M.config.path = vim.fn.stdpath "config" end
 end
 
 function M.run()

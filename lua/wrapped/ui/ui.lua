@@ -166,27 +166,42 @@ local function build_size_chart(size_history, target_width)
   local vals = size_history.values
   if #vals == 0 then return {} end
 
+  local min_val = math.min(unpack(vals))
   local max_val = math.max(unpack(vals))
-  if max_val == 0 then max_val = 1 end
+  local diff = max_val - min_val
+
+  -- dynamic baseline to "zoom in" on variation
+  local baseline = 0
+  if diff > 0 then
+    baseline = math.max(0, math.floor(min_val - diff * 0.5))
+  else
+    baseline = math.max(0, math.floor(min_val * 0.8))
+  end
+
+  if max_val == baseline then max_val = baseline + 1 end
+  local range = max_val - baseline
 
   -- normalize to 1-100 scale for bar graph
   local scaled = {} ---@type integer[]
   for _, v in ipairs(vals) do
-    table.insert(scaled, math.floor((v / max_val) * 100))
+    table.insert(scaled, math.floor(((v - baseline) / range) * 100))
   end
 
-  -- account for side labels (~4 chars) + " │ " (3 chars)
+  -- side labels (~4 chars) + " │ " (3 chars)
   local bar_w, bar_gap = 1, 1
   local bar_area = target_width - 8
   local max_items = math.floor(bar_area / (bar_w + bar_gap))
 
-  -- get the subset of data to display (last N items)
+  -- get the subset of data to display (downsample if too many items)
   local display_vals = scaled
   local num_data = #scaled
   if num_data > max_items then
     display_vals = {}
-    for i = num_data - (max_items - 1), num_data do
-      table.insert(display_vals, scaled[i])
+    -- show beginning and the last by downsampling
+    local step = (num_data - 1) / (max_items - 1)
+    for i = 0, max_items - 1 do
+      local idx = math.floor(1 + i * step + 0.5)
+      table.insert(display_vals, scaled[idx])
     end
   end
 
@@ -194,7 +209,9 @@ local function build_size_chart(size_history, target_width)
     val = display_vals,
     footer_label = { "󰔵  Config Size Over Time", "WrappedTitle" },
     format_labels = function(x)
-      return tostring(math.floor((x / 100) * max_val))
+      local val = math.floor(baseline + (x / 100) * range)
+      if val >= 1000 then return string.format("%.1fk", val / 1000) end
+      return tostring(val)
     end,
     baropts = {
       w = bar_w,
